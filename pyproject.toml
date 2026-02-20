@@ -1,0 +1,22 @@
+[project]
+name = "llm-agentic-legal-information-retrieval"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = []
+
+[tool.ruff]
+line-length = 120
+
+[tool.ruff.lint]
+select = ["ALL"]
+ignore = [
+  "COM812",  # missing-trailing-comma
+  "T20",  # flake8-print
+  "ERA",  # eradicate
+  "D",  # docstrings
+]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
