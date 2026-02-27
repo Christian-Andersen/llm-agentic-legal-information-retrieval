@@ -52,17 +52,28 @@ def train_and_use_embedder(
     top_k: int = 50,
 ) -> list[dict[str, Any]]:
     logger.info(f"Initializing Embedder Phase with {model_name}")
-    model = SentenceTransformer(model_name, trust_remote_code=True)
+    model = SentenceTransformer(model_name, trust_remote_code=True, model_kwargs={"dtype": torch.bfloat16})
 
-    train_examples = [InputExample(texts=[r["query"], r["gold_context"]]) for _, r in val_df.iterrows()]
+    # Truncate gold_context to avoid OOM during fine-tuning
+    train_examples = [InputExample(texts=[r["query"], r["gold_context"][:4000]]) for _, r in val_df.iterrows()]
     train_dataloader = DataLoader(train_examples, shuffle=True, batch_size=2)  # ty:ignore[invalid-argument-type]
     train_loss = losses.MultipleNegativesRankingLoss(model=model)
 
     logger.debug("Beginning Embedder fine-tuning...")
-    model.fit(train_objectives=[(train_dataloader, train_loss)], epochs=1)
+    model.fit(
+        train_objectives=[(train_dataloader, train_loss)],
+        epochs=1,
+    )
 
+    model.max_seq_length = 2048  # Cap sequence length to avoid massive masks
     logger.debug("Encoding corpus and performing semantic search...")
-    corpus_embeddings = model.encode(corpus_df["text"].tolist(), convert_to_tensor=True, show_progress_bar=True)
+    # Use smaller batch_size and numpy array to save memory
+    corpus_embeddings = model.encode(
+        corpus_df["text"].values,
+        batch_size=64,
+        convert_to_tensor=True,
+        show_progress_bar=True,
+    )
     query_embeddings = model.encode(test_df["query"].tolist(), prompt_name="query", convert_to_tensor=True)
 
     hits = semantic_search(query_embeddings, corpus_embeddings, top_k=top_k)
