@@ -27,7 +27,7 @@ repos:
           - --preserve-execution-counts
           - --preserve-notebook-metadata
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.14.6
+    rev: v0.15.2
     hooks:
       - id: ruff-check
         args: [--fix]
