@@ -5,19 +5,17 @@ from typing import Any
 import pandas as pd
 import polars as pl
 import torch
-from datasets import Dataset
 from loguru import logger
-from peft import LoraConfig, get_peft_model
 from sentence_transformers import CrossEncoder, InputExample, SentenceTransformer, losses
 from sentence_transformers.util import semantic_search
 from torch.utils.data import DataLoader
-from transformers import AutoModelForCausalLM, AutoTokenizer, TrainingArguments
-from trl import SFTTrainer
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
 # --- LOGGING CONFIGURATION ---
 # Configures Loguru to output to both the console and a file
 
 DATA_DIR = Path("./data/")
+DEV_MODE = True  # Toggle this to False for full run
 
 # --- PREPROCESSING ---
 
@@ -45,7 +43,7 @@ def prepare_val_training_data(val_df: pd.DataFrame, laws_df: pd.DataFrame, court
 
 
 def train_and_use_embedder(
-    val_df: pd.DataFrame,
+    train_df: pd.DataFrame,
     corpus_df: pd.DataFrame,
     test_df: pd.DataFrame,
     model_name: str = "Qwen/Qwen3-Embedding-0.6B",
@@ -55,7 +53,7 @@ def train_and_use_embedder(
     model = SentenceTransformer(model_name, trust_remote_code=True, model_kwargs={"dtype": torch.bfloat16})
 
     # Truncate gold_context to avoid OOM during fine-tuning
-    train_examples = [InputExample(texts=[r["query"], r["gold_context"][:4000]]) for _, r in val_df.iterrows()]
+    train_examples = [InputExample(texts=[r["query"], r["gold_context"][:4000]]) for _, r in train_df.iterrows()]
     train_dataloader = DataLoader(train_examples, shuffle=True, batch_size=2)  # ty:ignore[invalid-argument-type]
     train_loss = losses.MultipleNegativesRankingLoss(model=model)
 
@@ -97,7 +95,7 @@ def train_and_use_embedder(
 
 
 def train_and_use_reranker(
-    val_df: pd.DataFrame,
+    train_df: pd.DataFrame,
     test_candidates: list[dict[str, Any]],
     model_name: str = "BAAI/bge-reranker-base",
     top_n: int = 10,
@@ -106,7 +104,7 @@ def train_and_use_reranker(
     model = CrossEncoder(model_name, num_labels=1)
 
     train_examples = []
-    for _, r in val_df.iterrows():
+    for _, r in train_df.iterrows():
         train_examples.append(InputExample(texts=[r["query"], r["gold_context"]], label=1.0))
         train_examples.append(InputExample(texts=[r["query"], r["hard_negative"]], label=0.0))
 
@@ -134,7 +132,7 @@ def train_and_use_reranker(
 
 
 def train_and_use_llm(
-    val_df: pd.DataFrame, reranked_results: list[dict[str, Any]], model_name: str = "Qwen/Qwen2.5-1.5B-Instruct"
+    reranked_results: list[dict[str, Any]], model_name: str = "Qwen/Qwen2.5-1.5B-Instruct"
 ) -> pl.DataFrame:
     logger.info(f"Initializing LLM Phase with {model_name}")
     tokenizer = AutoTokenizer.from_pretrained(model_name)
@@ -142,34 +140,6 @@ def train_and_use_llm(
 
     # Load in bfloat16 for performance/memory balance
     model = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=torch.bfloat16, device_map="auto")
-
-    lora_config = LoraConfig(r=8, target_modules=["q_proj", "v_proj"], task_type="CAUSAL_LM")
-    model = get_peft_model(model, lora_config)
-
-    def format_chatml(query: str, context: str, gold: str) -> str:
-        return (
-            f"<|im_start|>system\nOutput ONLY citation IDs separated by semicolons.<|im_end|>\n"
-            f"<|im_start|>user\nContext: {context}\n\nQuery: {query}<|im_end|>\n"
-            f"<|im_start|>assistant\n{gold}<|im_end|>"
-        )
-
-    logger.debug("Formatting validation prompts for SFT...")
-    val_prompts = [
-        format_chatml(r["query"], r["gold_context"][:1500], r["gold_citations"]) for _, r in val_df.iterrows()
-    ]
-
-    trainer = SFTTrainer(
-        model=model,  # ty:ignore[invalid-argument-type]
-        train_dataset=Dataset.from_dict({"text": val_prompts}),
-        dataset_text_field="text",  # ty:ignore[unknown-argument]
-        max_seq_length=1024,  # ty:ignore[unknown-argument]
-        args=TrainingArguments(
-            output_dir="./tmp", per_device_train_batch_size=1, num_train_epochs=1, fp16=True, logging_steps=1
-        ),
-    )
-
-    logger.info("Beginning LoRA fine-tuning on LLM...")
-    trainer.train()
 
     final_output = []
     logger.info(f"Running inference on {len(reranked_results)} test queries...")
@@ -185,7 +155,7 @@ def train_and_use_llm(
         inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
 
         with torch.no_grad():
-            out = model.generate(**inputs, max_new_tokens=100, temperature=0.0)
+            out = model.generate(**inputs, max_new_tokens=100, do_sample=False)
 
         pred = tokenizer.decode(out[0][inputs.input_ids.shape[1] :], skip_special_tokens=True)
         final_output.append({"query_id": item["query_id"], "predicted_citations": pred.strip()})
@@ -203,16 +173,32 @@ if __name__ == "__main__":
     laws_p = pl.read_csv(DATA_DIR / "laws_de.csv").to_pandas()
     courts_p = pl.read_csv(DATA_DIR / "court_considerations.csv").to_pandas()
     val_p = pl.read_csv(DATA_DIR / "val.csv").to_pandas()
+    train_p = pl.read_csv(DATA_DIR / "train.csv").to_pandas()
     test_p = pl.read_csv(DATA_DIR / "test.csv").to_pandas()
 
     # 2. Setup
+    train_p = prepare_val_training_data(train_p, laws_p, courts_p)
     val_p = prepare_val_training_data(val_p, laws_p, courts_p)
     full_corpus = pd.concat([laws_p, courts_p], ignore_index=True)
 
+    if DEV_MODE:
+        logger.warning("DEV_MODE is ON: Sampling training data and corpus for speed.")
+        train_p = train_p.sample(n=min(100, len(train_p)), random_state=42)
+
+        # Ensure gold citations for sampled train data are in corpus
+        gold_cits = set()
+        for cits in train_p["gold_citations"]:
+            gold_cits.update([c.strip() for c in cits.split(";")])
+
+        gold_corpus = full_corpus[full_corpus["citation"].isin(gold_cits)]
+        other_corpus = full_corpus[~full_corpus["citation"].isin(gold_cits)]
+        sampled_other = other_corpus.sample(n=min(1000 - len(gold_corpus), len(other_corpus)), random_state=42)
+        full_corpus = pd.concat([gold_corpus, sampled_other], ignore_index=True)
+
     # 3. Pipeline
-    test_candidates = train_and_use_embedder(val_p, full_corpus, test_p)
-    reranked_list = train_and_use_reranker(val_p, test_candidates)
-    submission_df = train_and_use_llm(val_p, reranked_list)
+    test_candidates = train_and_use_embedder(train_p, full_corpus, test_p)
+    reranked_list = train_and_use_reranker(train_p, test_candidates)
+    submission_df = train_and_use_llm(reranked_list)
 
     # 4. Finalize
     submission_df.write_csv("submission.csv")
