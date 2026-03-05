@@ -11,9 +11,6 @@ from sentence_transformers.util import semantic_search
 from torch.utils.data import DataLoader
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-# --- LOGGING CONFIGURATION ---
-# Configures Loguru to output to both the console and a file
-
 DATA_DIR = Path("./data/")
 DEV_MODE = True  # Toggle this to False for full run
 
