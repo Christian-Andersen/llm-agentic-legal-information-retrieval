@@ -13,6 +13,7 @@ dependencies = [
     "loguru>=0.7.3",
     "peft>=0.18.1",
     "polars>=1.38.1",
+    "pydantic-settings>=2.13.1",
     "sentence-transformers>=5.2.3",
     "torch>=2.10.0",
     "trl>=0.28.0",

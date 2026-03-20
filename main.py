@@ -6,13 +6,21 @@ import pandas as pd
 import polars as pl
 import torch
 from loguru import logger
+from pydantic_settings import BaseSettings
 from sentence_transformers import CrossEncoder, InputExample, SentenceTransformer, losses
 from sentence_transformers.util import semantic_search
 from torch.utils.data import DataLoader
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 DATA_DIR = Path("./data/")
-DEV_MODE = True  # Toggle this to False for full run
+
+
+class Settings(BaseSettings):
+    train: bool = False
+    dev: bool = True
+
+
+settings = Settings()
 
 # --- PREPROCESSING ---
 
@@ -39,26 +47,27 @@ def prepare_val_training_data(val_df: pd.DataFrame, laws_df: pd.DataFrame, court
 # --- PHASE 1: EMBEDDER ---
 
 
-def train_and_use_embedder(
-    train_df: pd.DataFrame,
+def run_embedder(  # noqa: PLR0913
+    training_df: pd.DataFrame,
     corpus_df: pd.DataFrame,
     test_df: pd.DataFrame,
     model_name: str = "Qwen/Qwen3-Embedding-0.6B",
     top_k: int = 50,
+    *,
+    train: bool = True,
 ) -> list[dict[str, Any]]:
     logger.info(f"Initializing Embedder Phase with {model_name}")
     model = SentenceTransformer(model_name, trust_remote_code=True, model_kwargs={"dtype": torch.bfloat16})
 
-    # Truncate gold_context to avoid OOM during fine-tuning
-    train_examples = [InputExample(texts=[r["query"], r["gold_context"][:4000]]) for _, r in train_df.iterrows()]
-    train_dataloader = DataLoader(train_examples, shuffle=True, batch_size=2)  # ty:ignore[invalid-argument-type]
-    train_loss = losses.MultipleNegativesRankingLoss(model=model)
-
-    logger.debug("Beginning Embedder fine-tuning...")
-    model.fit(
-        train_objectives=[(train_dataloader, train_loss)],
-        epochs=1,
-    )
+    if train:
+        train_examples = [InputExample(texts=[r["query"], r["gold_context"][:4000]]) for _, r in training_df.iterrows()]
+        train_dataloader = DataLoader(train_examples, shuffle=True, batch_size=2)  # ty:ignore[invalid-argument-type]
+        train_loss = losses.MultipleNegativesRankingLoss(model=model)
+        logger.debug("Beginning Embedder fine-tuning...")
+        model.fit(
+            train_objectives=[(train_dataloader, train_loss)],
+            epochs=1,
+        )
 
     model.max_seq_length = 2048  # Cap sequence length to avoid massive masks
     logger.debug("Encoding corpus and performing semantic search...")
@@ -91,22 +100,25 @@ def train_and_use_embedder(
 # --- PHASE 2: RERANKER ---
 
 
-def train_and_use_reranker(
-    train_df: pd.DataFrame,
+def run_reranker(
+    training_df: pd.DataFrame,
     test_candidates: list[dict[str, Any]],
     model_name: str = "BAAI/bge-reranker-base",
     top_n: int = 10,
+    *,
+    train: bool = True,
 ) -> list[dict[str, Any]]:
     logger.info(f"Initializing Reranker Phase with {model_name}")
     model = CrossEncoder(model_name, num_labels=1)
 
-    train_examples = []
-    for _, r in train_df.iterrows():
-        train_examples.append(InputExample(texts=[r["query"], r["gold_context"]], label=1.0))
-        train_examples.append(InputExample(texts=[r["query"], r["hard_negative"]], label=0.0))
+    if train:
+        train_examples = []
+        for _, r in training_df.iterrows():
+            train_examples.append(InputExample(texts=[r["query"], r["gold_context"]], label=1.0))
+            train_examples.append(InputExample(texts=[r["query"], r["hard_negative"]], label=0.0))
 
-    train_dataloader = DataLoader(train_examples, shuffle=True, batch_size=2)  # ty:ignore[invalid-argument-type]
-    model.fit(train_dataloader=train_dataloader, epochs=1)
+        train_dataloader = DataLoader(train_examples, shuffle=True, batch_size=2)  # ty:ignore[invalid-argument-type]
+        model.fit(train_dataloader=train_dataloader, epochs=1)
 
     reranked_results = []
     for item in test_candidates:
@@ -174,17 +186,16 @@ if __name__ == "__main__":
     test_p = pl.read_csv(DATA_DIR / "test.csv").to_pandas()
 
     # 2. Setup
-    train_p = prepare_val_training_data(train_p, laws_p, courts_p)
+    training_df = prepare_val_training_data(train_p, laws_p, courts_p)
     val_p = prepare_val_training_data(val_p, laws_p, courts_p)
     full_corpus = pd.concat([laws_p, courts_p], ignore_index=True)
 
-    if DEV_MODE:
-        logger.warning("DEV_MODE is ON: Sampling training data and corpus for speed.")
-        train_p = train_p.sample(n=min(100, len(train_p)), random_state=42)
+    if settings.dev:
+        logger.warning("DEV mode is ON: Sampling training data and corpus for speed.")
+        training_df = training_df.sample(n=min(100, len(training_df)), random_state=42)
 
-        # Ensure gold citations for sampled train data are in corpus
         gold_cits = set()
-        for cits in train_p["gold_citations"]:
+        for cits in training_df["gold_citations"]:
             gold_cits.update([c.strip() for c in cits.split(";")])
 
         gold_corpus = full_corpus[full_corpus["citation"].isin(gold_cits)]
@@ -193,8 +204,8 @@ if __name__ == "__main__":
         full_corpus = pd.concat([gold_corpus, sampled_other], ignore_index=True)
 
     # 3. Pipeline
-    test_candidates = train_and_use_embedder(train_p, full_corpus, test_p)
-    reranked_list = train_and_use_reranker(train_p, test_candidates)
+    test_candidates = run_embedder(training_df=training_df, corpus_df=full_corpus, test_df=test_p, train=settings.train)
+    reranked_list = run_reranker(training_df=training_df, test_candidates=test_candidates, train=settings.train)
     submission_df = train_and_use_llm(reranked_list)
 
     # 4. Finalize
