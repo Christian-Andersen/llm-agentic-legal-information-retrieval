@@ -73,7 +73,7 @@ def run_embedder(  # noqa: PLR0913
     logger.debug("Encoding corpus and performing semantic search...")
     # Use smaller batch_size and numpy array to save memory
     corpus_embeddings = model.encode(
-        corpus_df["text"].values,
+        corpus_df["text"].tolist(),
         batch_size=64,
         convert_to_tensor=True,
         show_progress_bar=True,
@@ -140,15 +140,52 @@ def run_reranker(
 # --- PHASE 3: LLM ---
 
 
+def parse_and_validate_citations(
+    llm_output: str,
+    valid_citations: set[str],
+    fallback_citation: str | None,
+) -> str:
+    """Extract and validate citations from LLM output against corpus."""
+    import re
+
+    patterns = [
+        r"(?:Art\.)\s*\d+[a-z]?(?:\s*Abs\.\s*\d+)?(?:\s*[A-ZÄÖÜ]{2,})?(?:\s*\d+)?",
+        r"BGE\s+\d+\s+[IV]+\s+\d+",
+    ]
+    combined = "|".join(f"(?:{p})" for p in patterns)
+    regex = re.compile(combined, re.IGNORECASE)
+
+    raw_citations = regex.findall(llm_output)
+
+    normalized = []
+    for c in raw_citations:
+        cleaned = " ".join(c.split())
+        if cleaned in valid_citations:
+            normalized.append(cleaned)
+
+    normalized = list(dict.fromkeys(normalized))
+
+    if not normalized and fallback_citation:
+        return fallback_citation
+
+    if not normalized:
+        return ""
+
+    return ";".join(normalized)
+
+
 def train_and_use_llm(
-    reranked_results: list[dict[str, Any]], model_name: str = "Qwen/Qwen2.5-1.5B-Instruct"
+    reranked_results: list[dict[str, Any]],
+    corpus_df: pd.DataFrame,
+    model_name: str = "Qwen/Qwen2.5-1.5B-Instruct",
 ) -> pl.DataFrame:
     logger.info(f"Initializing LLM Phase with {model_name}")
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     tokenizer.pad_token = tokenizer.eos_token
 
-    # Load in bfloat16 for performance/memory balance
     model = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=torch.bfloat16, device_map="auto")
+
+    valid_citations = set(corpus_df["citation"].astype(str).str.strip().str.strip())
 
     final_output = []
     logger.info(f"Running inference on {len(reranked_results)} test queries...")
@@ -156,7 +193,10 @@ def train_and_use_llm(
         ctx = "\n".join([f"{c['citation']}: {c['text']}" for c in item["top_candidates"]])[:3000]
 
         messages = [
-            {"role": "system", "content": "Output ONLY the relevant citation IDs separated by semicolons."},
+            {
+                "role": "system",
+                "content": "Always output at least one citation ID. If uncertain, make your best guess. Output citation IDs separated by semicolons without additional text.",
+            },
             {"role": "user", "content": f"Context: {ctx}\n\nQuery: {item['query']}"},
         ]
 
@@ -166,8 +206,12 @@ def train_and_use_llm(
         with torch.no_grad():
             out = model.generate(**inputs, max_new_tokens=100, do_sample=False)
 
-        pred = tokenizer.decode(out[0][inputs.input_ids.shape[1] :], skip_special_tokens=True)
-        final_output.append({"query_id": item["query_id"], "predicted_citations": pred.strip()})
+        raw_pred = tokenizer.decode(out[0][inputs.input_ids.shape[1] :], skip_special_tokens=True)
+
+        fallback = item["top_candidates"][0]["citation"] if item["top_candidates"] else None
+        validated = parse_and_validate_citations(raw_pred.strip(), valid_citations, fallback)
+
+        final_output.append({"query_id": item["query_id"], "predicted_citations": validated})
 
     logger.success("LLM generation complete.")
     return pl.DataFrame(final_output)
@@ -206,7 +250,7 @@ if __name__ == "__main__":
     # 3. Pipeline
     test_candidates = run_embedder(training_df=training_df, corpus_df=full_corpus, test_df=test_p, train=settings.train)
     reranked_list = run_reranker(training_df=training_df, test_candidates=test_candidates, train=settings.train)
-    submission_df = train_and_use_llm(reranked_list)
+    submission_df = train_and_use_llm(reranked_list, corpus_df=full_corpus)
 
     # 4. Finalize
     submission_df.write_csv("submission.csv")
