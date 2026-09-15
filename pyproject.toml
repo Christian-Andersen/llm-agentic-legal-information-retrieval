@@ -3,20 +3,20 @@ name = "llm-agentic-legal-information-retrieval"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
-requires-python = ">=3.14"
+requires-python = ">=3.13"
 dependencies = [
-    "datasets>=4.5.0",
-    "langchain>=1.2.10",
-    "langchain-community>=0.4.1",
-    "langchain-huggingface>=1.2.0",
-    "langchain-openai>=1.1.10",
-    "loguru>=0.7.3",
-    "peft>=0.18.1",
-    "polars>=1.38.1",
-    "pydantic-settings>=2.13.1",
-    "sentence-transformers>=5.2.3",
-    "torch>=2.10.0",
-    "trl>=0.28.0",
+  "datasets>=4.5.0",
+  "langchain>=1.2.10",
+  "langchain-community>=0.4.1",
+  "langchain-huggingface>=1.2.0",
+  "langchain-openai>=1.1.10",
+  "loguru>=0.7.3",
+  "peft>=0.18.1",
+  "polars>=1.38.1",
+  "pydantic-settings>=2.13.1",
+  "sentence-transformers>=5.2.3",
+  "torch>=2.10.0",
+  "trl>=0.28.0",
 ]
 
 [tool.ruff]
@@ -25,10 +25,11 @@ line-length = 120
 [tool.ruff.lint]
 select = ["ALL"]
 ignore = [
-  "COM812",  # missing-trailing-comma
-  "T20",  # flake8-print
-  "ERA",  # eradicate
-  "D",  # docstrings
+  "COM812", # missing-trailing-comma
+  "T20",    # flake8-print
+  "ERA",    # eradicate
+  "D",      # docstrings
+  "CPY",    # flake8-copyright
 ]
 
 [tool.ruff.lint.pydocstyle]
@@ -36,7 +37,7 @@ convention = "google"
 
 [dependency-groups]
 dev = [
-    "prek>=0.3.3",
-    "ruff>=0.15.2",
-    "ty>=0.0.17",
+  "prek>=0.3.3",
+  "ruff>=0.15.2",
+  "ty>=0.0.17",
 ]

@@ -1,4 +1,5 @@
 import gc
+import re
 from pathlib import Path
 from typing import Any
 
@@ -7,7 +8,8 @@ import polars as pl
 import torch
 from loguru import logger
 from pydantic_settings import BaseSettings
-from sentence_transformers import CrossEncoder, InputExample, SentenceTransformer, losses
+from sentence_transformers import CrossEncoder, InputExample, SentenceTransformer
+from sentence_transformers.sentence_transformer import losses
 from sentence_transformers.util import semantic_search
 from torch.utils.data import DataLoader
 from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -146,8 +148,6 @@ def parse_and_validate_citations(
     fallback_citation: str | None,
 ) -> str:
     """Extract and validate citations from LLM output against corpus."""
-    import re
-
     patterns = [
         r"(?:Art\.)\s*\d+[a-z]?(?:\s*Abs\.\s*\d+)?(?:\s*[A-ZÄÖÜ]{2,})?(?:\s*\d+)?",
         r"BGE\s+\d+\s+[IV]+\s+\d+",
@@ -181,7 +181,7 @@ def train_and_use_llm(
 ) -> pl.DataFrame:
     logger.info(f"Initializing LLM Phase with {model_name}")
     tokenizer = AutoTokenizer.from_pretrained(model_name)
-    tokenizer.pad_token = tokenizer.eos_token
+    tokenizer.pad_token = tokenizer.eos_token  # ty:ignore[invalid-assignment,unresolved-attribute]
 
     model = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=torch.bfloat16, device_map="auto")
 
@@ -195,21 +195,32 @@ def train_and_use_llm(
         messages = [
             {
                 "role": "system",
-                "content": "Always output at least one citation ID. If uncertain, make your best guess. Output citation IDs separated by semicolons without additional text.",
+                "content": (
+                    "Always output at least one citation ID. If uncertain, make your best guess. "
+                    "Output citation IDs separated by semicolons without additional text."
+                ),
             },
             {"role": "user", "content": f"Context: {ctx}\n\nQuery: {item['query']}"},
         ]
 
-        prompt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-        inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
+        prompt = tokenizer.apply_chat_template(  # ty:ignore[unresolved-attribute]
+            messages, tokenize=False, add_generation_prompt=True
+        )
+        inputs = tokenizer(prompt, return_tensors="pt").to(model.device)  # ty:ignore[call-non-callable]
 
         with torch.no_grad():
-            out = model.generate(**inputs, max_new_tokens=100, do_sample=False)
+            out = model.generate(**inputs, max_new_tokens=100, do_sample=False)  # ty:ignore[invalid-argument-type]
 
-        raw_pred = tokenizer.decode(out[0][inputs.input_ids.shape[1] :], skip_special_tokens=True)
+        raw_pred = tokenizer.decode(  # ty:ignore[unresolved-attribute]
+            out[0][inputs.input_ids.shape[1] :], skip_special_tokens=True
+        )
 
         fallback = item["top_candidates"][0]["citation"] if item["top_candidates"] else None
-        validated = parse_and_validate_citations(raw_pred.strip(), valid_citations, fallback)
+        validated = parse_and_validate_citations(
+            raw_pred.strip(),  # ty:ignore[unresolved-attribute]
+            valid_citations,
+            fallback,
+        )
 
         final_output.append({"query_id": item["query_id"], "predicted_citations": validated})
 
