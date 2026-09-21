@@ -11,6 +11,17 @@
       "automerge": false
     }
   ],
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "Track pinned hook revisions (rev) of remote hook repos in prek.toml",
+      "fileMatch": ["(^|/)prek\\.toml$"],
+      "matchStrings": [
+        "repo\\s*=\\s*[\"']https://github\\.com/(?<depName>[^/\"']+/[^/\"']+)[\"'][^\\[]*?rev\\s*=\\s*[\"'](?<currentValue>[^\"']+)[\"']"
+      ],
+      "datasourceTemplate": "github-tags"
+    }
+  ],
   "lockFileMaintenance": {
     "enabled": true,
     "schedule": ["before 6am on the first day of the month"]
