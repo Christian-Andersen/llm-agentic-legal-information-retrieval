@@ -3,6 +3,14 @@
   "nix": {
     "enabled": true
   },
+  "packageRules": [
+    {
+      "description": "Group all Nix flake lock input updates into a single PR and keep them out of automerge",
+      "matchManagers": ["nix"],
+      "groupName": "Nix flake inputs",
+      "automerge": false
+    }
+  ],
   "lockFileMaintenance": {
     "enabled": true,
     "schedule": ["before 6am on the first day of the month"]
